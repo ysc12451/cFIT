@@ -1,0 +1,221 @@
+---
+title: "cFIT"
+output: html_document
+date: "2023-08-24"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Getting started
+
+First load the package
+
+```{r, eval=T}
+library(cFIT)
+library(caret)
+options(warn = -1)
+data_file_path = "D:/OneDrive/OneDrive - UW-Madison/Kris/Code/curatedMetagenomicDataAnalyses/vignettes/"
+```
+
+Load dataset and deal with NAs
+```{r}
+crc_whole <- read.csv(paste0(data_file_path, "crc_whole_taxon.csv"))
+# crc_sepa <- read.csv(paste0(data_file_path, "crc_separate_taxon.csv"))
+crc_meta <- read.csv(paste0(data_file_path, "crc_meta.csv"))
+study_names <- unique(crc_whole[,2])
+study_nobs <- c(154,60,81,80,60,80,104,125,616,128,156)
+
+# remove NA in the response
+rows_with_na <- which(!complete.cases(crc_whole[,3])) #
+crc_whole <- crc_whole[-rows_with_na, ]
+crc_meta <- crc_meta[-rows_with_na, ]
+
+# temperally set NA in the count matrix as 0
+crc_whole[is.na(crc_whole)] <- 0
+
+colnames(crc_whole) <- gsub("__", "-", colnames(crc_whole))
+colnames(crc_whole) <- gsub("_", "-", colnames(crc_whole))
+
+print(paste(nrow(crc_whole), 'observations, ', ncol(crc_whole)-3, 'species'))
+```
+
+
+```{r, eval=T}
+meta_data = list(FengQ_2015=data.frame(tech=rep(name, times = study_nobs[1])),
+                GuptaA_2019=data.frame(tech=rep(name, times = study_nobs[2])),
+                HanniganGD_2017=data.frame(tech=rep(name, times = study_nobs[3])),
+                ThomasAM_2018a=data.frame(tech=rep(name, times = study_nobs[4])),
+                ThomasAM_2018b=data.frame(tech=rep(name, times = study_nobs[5])),
+                ThomasAM_2019_c=data.frame(tech=rep(name, times = study_nobs[6])),
+                VogtmannE_2016=data.frame(tech=rep(name, times = study_nobs[7])),
+                WirbelJ_2018=data.frame(tech=rep(name, times = study_nobs[8])),
+                YachidaS_2019=data.frame(tech=rep(name, times = study_nobs[9])),
+                YuJ_2015=data.frame(tech=rep(name, times = study_nobs[10])),
+                ZellerG_2014=data.frame(tech=rep(name, times = study_nobs[11])))
+```
+
+
+```{r, eval=T}
+# extract the raw counts and metadata for data sets from 5 technologies
+data.list = split_dataset_by_batch(X=as.matrix(crc_whole[,4:ncol(crc_whole)]), 
+                                   batch = crc_whole[,2], 
+                                   labels = crc_meta$study_condition,
+                                   metadata = crc_meta, 
+                                   dataset.name = 'crc:')
+
+```
+
+## Data integration
+
+cFIT integration is composed of the following procedure:
+
+* Gene selection. Select highly variable genes that are shared among data sources. Here we adopt the proposed procedure from [Seurat V3](https://satijalab.org/seurat/).
+* Data preprocessing. Library size normalization and log transformation
+* Model parameter estimation. The model parameters are estimated throught iterative NMF
+* Post processing, evaluation, and downstream analysis.
+
+Select 2000 highly variable genes
+```{r, eval=T}
+# select highly variable genes
+species = select_genes(data.list$X.list, ngenes=1000, verbose=F)
+```
+
+Preprocess to normalize by library size and log transform
+```{r,  eval=T}
+# data preprocessing
+exprs.list = preprocess_for_integration(data.list$X.list, species, scale.factor=10^4, scale=T, center=F)
+# exprs.list is a list with number of studies' subsets (11 subsets)
+```
+
+We first integrate data sets from ten studies, and then transfer the learned factor matrix to a relatively small dataset: GuptaA_2019 (60 observations).
+
+Perform data integration with `CFITIntegrate`. 
+The only parameter to adjust is `r`, which is the number of factors of the common factor matrix (shared across datasets). The algorithm is relatively robust to `r` as long as r approximate the number of underlying distinct cell types across all data sets. 
+
+Other minor parameters that can be adjusted is 
+`max.niter` (100 by default), 
+`tol` tolerance used in stopping criteria (1e-5 by default), 
+`nrep` number of repeats of the run (1 by default, require much longer if increased), 
+`init` parameter initialization (NULL). The parallel is control by `future` R package, by default `sequential` plan is used. To enable parallel computation, set `future.plan='multicore` and set the `workers` as the number of cores to use. Note that Rstudio does not support 'multicore'.
+
+```{r, eval=T}
+# integrate four largest datasets, takes roughly 20 minutes to run without parallization
+ref.data = c(1,3,4,5,6,7,8,9,10,11)
+int.out = CFITIntegrate(X.list=exprs.list[ref.data], r=15, max.niter=100, future.plan='sequential', seed=0, verbose=F)
+
+# For large datasets we recommende using the sketched version for fast convergence.
+# int.out = CFITIntegrate_sketched(X.list=exprs.list[ref.data], r=15, subsample.prop = 0.1,
+#                                  max.niter=100, early.stopping=10, tol=1e-8, 
+#                                  future.plan='sequential', seed=42, verbose=F)
+```
+
+
+```{r}
+save(int.out, file = paste0(data_file_path, "crc_intout.RData"))
+```
+
+The output is a list containing
+
+* estimated model parameters, common factor matrix `W`, factor loading matrices (per datasets) `H.list`, dataset specific scaling `lambda.list` and shift `b.list`
+* convergence status `convergence`, number of iterations `niter`, and final objective function value `obj`, final objective delta `delta`
+* parameters used for the function call, including `gamma`, `max.iter`, `tol`, `rep`
+
+We obtain the integrated data via
+```{r,  eval=T}
+# nobs-by-nspecies expression matrix
+exprs.int = do.call(rbind, int.out$H.list) %*% t(int.out$W)
+
+# nobs-by-r low dimensiional representation
+Hnorm = do.call(rbind, int.out$H.list) %*% diag(colSums(int.out$W))
+```
+
+```{r}
+a = do.call(rbind, int.out$H.list)
+b = diag(colSums(int.out$W))
+```
+
+
+
+Visualize the integrated data via UMAP plot,
+```{r, eval=T, fig.align='center',fig.show="hold", fig.cap='Integrated pancreas islet cells data sests from four technologies.'}
+studies = do.call(c, lapply(data.list$metadata.list[ref.data], function(x) x$study_name))
+studies_all = do.call(c, lapply(data.list$metadata.list, function(x) x$study_name))
+# celltype = do.call(c, data.list$labels.list[ref.data])
+celltype = tech
+
+umap.out = plot_umap(X=Hnorm, labels=studies, 
+                     pca = NULL, n_components = 2, n_neighbors = 50, min_dist = 0.1, # umap parameters
+                     point.size = 0.6, alpha=0.8, title=NULL, legend.name='study', # figure parameters
+                     seed=42)
+
+p1 = umap.out$p # colored by technologies
+# p2 = plot_umap(labels=tech, point.size = 0.5, alpha=0.5, legend.name='technology', emb=umap.out$emb)$p # colored by cell types
+p1
+# p2
+```
+
+
+Calculate the alignment score for each study
+
+```{r, eval=T}
+alignment.score.out = calculate_alignment(X.list=list(Hnorm), k=30, balanced=F, dataset=studies, labels=studies)
+alignment.score.out$alignment.per.dataset
+```
+
+## Data transfer
+
+Next we transfer the learned factor matrix to the smallest data set, containing 60 observations from study GuptaA_2019.
+
+```{r, eval=T}
+# transfer: run time 10 seconds
+tf.out = CFITTransfer(Xtarget=exprs.list[[2]], Wref=int.out$W, max.niter = 100, seed=0, verbose=F)
+```
+
+Visualize the transferred results via UMAP plot,
+```{r, eval=T, fig.align='center',fig.show="hold", fig.cap='cFIT transfer results.'}
+Hnorm = rbind(do.call(rbind, int.out$H.list), tf.out$H) %*% diag(colSums(int.out$W))
+source = rep(c('reference','target'), c(nrow(do.call(rbind, int.out$H.list)), nrow(tf.out$H)))
+celltype = do.call(c, c(data.list$labels.list[ref.data],data.list$labels.list[4]))
+
+umap.out = plot_umap(X=Hnorm, labels=source, min_dist = 0.1, # umap parameters
+                     point.size = 0.6, alpha=0.8, title=NULL, legend.name='source', 
+                     cols=c('grey80','red'), seed=0)
+
+p1 = umap.out$p # colored by source
+# p2 = plot_umap(labels=celltype, point.size = 0.5, alpha=0.5, legend.name='cell type',  emb=umap.out$emb)$p # colored by cell types
+p1
+# p2
+```
+
+
+Assign labels for each cell in the target data by querying the cell type of target cells within k nearest neighbors.
+
+
+```{r, eval=T}
+est.labels = asign_labels(exprs.source=do.call(rbind, int.out$H.list), 
+                           exprs.target=tf.out$H, 
+                           labels.source=do.call(c, data.list$labels.list[ref.data]))
+plotContTable(est_label=est.labels, true_label=data.list$labels.list[[2]], ylab='Mapped type')
+```
+```{r}
+a = table(est.labels, data.list$labels.list[[2]])[1:2,1:2]
+```
+
+
+```{r}
+# Confusion matrix
+confusion_matrix <- confusionMatrix(table(est.labels, data.list$labels.list[[2]])[2:3,1:2])
+
+# Precision, recall, F1-score
+precision <- confusion_matrix$byClass["Precision"]
+recall <- confusion_matrix$byClass["Recall"]
+f1_score <- confusion_matrix$byClass["F1"]
+
+# Print the metrics
+print(precision)
+print(recall)
+print(f1_score)
+```
+

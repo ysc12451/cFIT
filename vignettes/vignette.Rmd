@@ -48,7 +48,7 @@ We illustrate the standard workflow of data integration as well as data transfer
 
 ```{r, eval=T}
 library(SeuratData)
-# InstallData("panc8") # if not installed, require memory of 118MB
+InstallData("panc8") # if not installed, require memory of 118MB
 data("panc8")
 ```
 
@@ -73,6 +73,11 @@ data.list = split_dataset_by_batch(X=t(as.matrix(panc8@assays$RNA@counts)),
 
 ```
 
+```{r}
+a = panc8@meta.data
+```
+
+
 Select 2000 highly variable genes
 ```{r, eval=T}
 # select highly variable genes
@@ -88,10 +93,11 @@ We first integrate data sets from four technologies (inDrop, celseq, celseq2, Sm
 
 Perform data integration with `CFITIntegrate`. The only parameter to adjust is `r`, which is the number of factors of the common factor matrix (shared across datasets). The algorithm is relatively robust to `r` as long as r approximate the number of underlying distinct cell types across all data sets. Other minor parameters that can be adjusted is `max.niter` (100 by default), `tol` tolerance used in stopping criteria (1e-5 by default), `nrep` number of repeats of the run (1 by default, require much longer if increased), `init` parameter initialization (NULL). The parallel is control by `future` R package, by default `sequential` plan is used. To enable parallel computation, set `future.plan='multicore` and set the `workers` as the number of cores to use. Note that Rstudio does not support 'multicore'.
 
+
 ```{r, eval=T}
 # integrate four largest datasets, takes roughly 20 minutes to run without parallization
 ref.data = c(1,2,3,5)
-int.out = CFITIntegrate(X.list=exprs.list[ref.data], r=15, max.niter=100, future.plan='sequential', seed=0, verbose=F)
+int.out = CFITIntegrate(X.list=exprs.list[ref.data], r=15, max.niter=1, future.plan='sequential', seed=0, verbose=F)
 
 # For large datasets we recommende using the sketched version for fast convergence.
 # int.out = CFITIntegrate_sketched(X.list=exprs.list[ref.data], r=15, subsample.prop = 0.1,
